@@ -37,17 +37,12 @@ func main() {
 
 	fmt.Println("Inicio da Leitura Concorrente: ")
 	start := time.Now()
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		report := ProcessConcurrentNaive(files)
-		elapsed := time.Since(start)
-		fmt.Println("Fim da Leitura do Processamento Concorrente : ", elapsed)
-		fmt.Println(report.Errors)
-	}()
 
-	wg.Wait()
+	report := ProcessConcurrentNaive(files)
+	elapsed := time.Since(start)
+	fmt.Println("Fim da Leitura do Processamento Concorrente : ", elapsed)
+	fmt.Println(report.Errors)
+
 }
 
 type Event struct {
@@ -147,34 +142,42 @@ func ProcessSequential(files []string) *Report {
 }
 func ProcessConcurrentNaive(files []string) *Report {
 	report := NewReport()
+	var wg sync.WaitGroup
+
 	for _, file := range files {
-		fileHandle, err := os.Open(file)
+		wg.Add(1)
 
-		if err != nil {
-			println("Erro de Arquivo : ", file)
-			report.AddError()
-			continue
-		}
-
-		scanner := bufio.NewScanner(fileHandle)
-
-		for scanner.Scan() {
-			line := scanner.Text()
-
-			var event Event
-
-			err := json.Unmarshal([]byte(line), &event)
+		go func(filename string) {
+			defer wg.Done()
+			fileHandle, err := os.Open(file)
 
 			if err != nil {
+				println("Erro de Arquivo : ", file)
 				report.AddError()
-				continue
+				return
 			}
 
-			report.AddEvent(event)
-		}
+			scanner := bufio.NewScanner(fileHandle)
 
-		fileHandle.Close()
+			for scanner.Scan() {
+				line := scanner.Text()
+
+				var event Event
+
+				err := json.Unmarshal([]byte(line), &event)
+
+				if err != nil {
+					report.AddError()
+					continue
+				}
+
+				report.AddEvent(event)
+			}
+
+			defer fileHandle.Close()
+		}(file)
+
 	}
-
+	wg.Wait()
 	return report
 }
