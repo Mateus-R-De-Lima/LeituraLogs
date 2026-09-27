@@ -25,7 +25,7 @@ func main() {
 		"./logs/log_007.json",
 		"./logs/log_008.json",
 		"./logs/log_009.json",
-		"./logs/log_0010.json",
+		"./logs/log_010.json",
 	}
 	// Exemplo de Procesamento Sequencial
 	//fmt.Println("Inicio da Leitura Sequencial: ")
@@ -35,12 +35,18 @@ func main() {
 	//fmt.Println("Fim da Leitura do Processamento Sequencial : ", elapsed)
 	//fmt.Println(report.Errors)
 
-	fmt.Println("Inicio da Leitura Concorrente: ")
-	start := time.Now()
+	//fmt.Println("Inicio da Leitura Concorrente: ")
+	//start := time.Now()
+	//report := ProcessConcurrentNaive(files)
+	//elapsed := time.Since(start)
+	//fmt.Println("Fim da Leitura do Processamento Concorrente : ", elapsed)
+	//fmt.Println(report.Errors)
 
-	report := ProcessConcurrentNaive(files)
+	fmt.Println("Inicio da Leitura Concorrente com Mutex (A Solução de Memória Compartilhada): ")
+	start := time.Now()
+	report := ProcessConcurrentMutex(files)
 	elapsed := time.Since(start)
-	fmt.Println("Fim da Leitura do Processamento Concorrente : ", elapsed)
+	fmt.Println("Fim da Leitura do Processamento Concorrente  com Mutex (A Solução de Memória Compartilhada): ", elapsed)
 	fmt.Println(report.Errors)
 
 }
@@ -90,6 +96,7 @@ func GenerateMockFiles(dir string, numFiles, eventsPerFile int) error {
 type Report struct {
 	Events []Event
 	Errors int
+	mu     sync.Mutex
 }
 
 func NewReport() *Report {
@@ -102,7 +109,17 @@ func NewReport() *Report {
 func (r *Report) AddEvent(event Event) {
 	r.Events = append(r.Events, event)
 }
+func (r *Report) AddEventSafe(event Event) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.Events = append(r.Events, event)
+}
 func (r *Report) AddError() {
+	r.Errors++
+}
+func (r *Report) AddErrorSafe() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.Errors++
 }
 func ProcessSequential(files []string) *Report {
@@ -175,6 +192,48 @@ func ProcessConcurrentNaive(files []string) *Report {
 			}
 
 			defer fileHandle.Close()
+		}(file)
+
+	}
+	wg.Wait()
+	return report
+}
+
+func ProcessConcurrentMutex(files []string) *Report {
+	report := NewReport()
+	var wg sync.WaitGroup
+
+	for _, file := range files {
+		wg.Add(1)
+
+		go func(filename string) {
+			defer wg.Done()
+			fileHandle, err := os.Open(file)
+
+			if err != nil {
+				println("Erro de Arquivo : ", file)
+				report.AddErrorSafe()
+				return
+			}
+			defer fileHandle.Close()
+
+			scanner := bufio.NewScanner(fileHandle)
+
+			for scanner.Scan() {
+				line := scanner.Text()
+
+				var event Event
+
+				err := json.Unmarshal([]byte(line), &event)
+
+				if err != nil {
+					report.AddErrorSafe()
+					continue
+				}
+
+				report.AddEventSafe(event)
+			}
+
 		}(file)
 
 	}
