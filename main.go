@@ -11,58 +11,65 @@ import (
 	"time"
 )
 
-func main() {
-	//GenerateMockFiles("./logs", 11, 5000)
+// Parte 0: Estruturas de Dados e Funções Auxiliares
 
-	files := []string{
-		"./logs/log_000.json",
-		"./logs/log_001.json",
-		"./logs/log_002.json",
-		"./logs/log_003.json",
-		"./logs/log_004.json",
-		"./logs/log_005.json",
-		"./logs/log_006.json",
-		"./logs/log_007.json",
-		"./logs/log_008.json",
-		"./logs/log_009.json",
-		"./logs/log_010.json",
-	}
-	// Exemplo de Procesamento Sequencial
-	//fmt.Println("Inicio da Leitura Sequencial: ")
-	//start := time.Now()
-	//report := ProcessSequential(files)
-	//elapsed := time.Since(start)
-	//fmt.Println("Fim da Leitura do Processamento Sequencial : ", elapsed)
-	//fmt.Println(report.Errors)
-
-	//fmt.Println("Inicio da Leitura Concorrente: ")
-	//start := time.Now()
-	//report := ProcessConcurrentNaive(files)
-	//elapsed := time.Since(start)
-	//fmt.Println("Fim da Leitura do Processamento Concorrente : ", elapsed)
-	//fmt.Println(report.Errors)
-
-	//fmt.Println("Inicio da Leitura Concorrente com Mutex (A Solução de Memória Compartilhada): ")
-	//start := time.Now()
-	//report := ProcessConcurrentMutex(files)
-	//elapsed := time.Since(start)
-	//fmt.Println("Fim da Leitura do Processamento Concorrente  com Mutex (A Solução de Memória Compartilhada): ", elapsed)
-	//fmt.Println(report.Errors)
-
-	fmt.Println("Inicio da Leitura ProcessPipeline : O Padrão Idiomático (Worker Pool & Channels) ")
-	start := time.Now()
-	report := ProcessPipeline(files, 2)
-	elapsed := time.Since(start)
-	fmt.Println("Fim da Leitura  ProcessPipeline : O Padrão Idiomático (Worker Pool & Channels) tempo: ", elapsed)
-	fmt.Println(report.Errors)
-
-}
-
+// Event representa a estrutura de um único log em formato JSON.
 type Event struct {
 	EventType string `json:"event_type"`
 	Region    string `json:"region"`
 }
 
+// Report armazena os dados agregados do processamento dos logs.
+// O Mutex é crucial para garantir o acesso seguro em um ambiente concorrente.
+type Report struct {
+	TotalEvents    int
+	TotalErrors    int
+	EventsByType   map[string]int
+	EventsByRegion map[string]int
+	mutex          sync.Mutex
+}
+
+// NewReport inicializa e retorna um ponteiro para uma nova estrutura Report.
+func NewReport() *Report {
+	return &Report{
+		EventsByType:   make(map[string]int),
+		EventsByRegion: make(map[string]int),
+	}
+}
+
+// --- Métodos do Report (API de agregação) ---
+
+// AddEvent adiciona um evento ao relatório. Esta versão NÃO é thread-safe.
+func (r *Report) AddEvent(event Event) {
+	r.TotalEvents++
+	r.EventsByType[event.EventType]++
+	r.EventsByRegion[event.Region]++
+}
+
+// AddError adiciona um erro de processamento ao relatório. NÃO é thread-safe.
+func (r *Report) AddError() {
+	r.TotalErrors++
+}
+
+// AddEventSafe adiciona um evento ao relatório de forma segura para concorrência.
+func (r *Report) AddEventSafe(event Event) {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	// Chama a lógica não-segura interna
+	r.AddEvent(event)
+}
+
+// AddErrorSafe adiciona um erro ao relatório de forma segura para concorrência.
+func (r *Report) AddErrorSafe() {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	// Chama a lógica não-segura interna
+	r.AddError()
+}
+
+// --- Fim dos Métodos do Report ---
+
+// GenerateMockFiles cria arquivos de log JSON para serem processados.
 func GenerateMockFiles(dir string, numFiles, eventsPerFile int) error {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
@@ -100,267 +107,238 @@ func GenerateMockFiles(dir string, numFiles, eventsPerFile int) error {
 	return nil
 }
 
-type Report struct {
-	Events []Event
-	Errors int
-	mu     sync.Mutex
-}
-
-func NewReport() *Report {
-	return &Report{
-		Events: make([]Event, 0),
-		Errors: 0,
+// processFile é uma função auxiliar que processa um único arquivo de log.
+func processFile(
+	filename string,
+	addEventFunc func(Event),
+	addErrorFunc func(error),
+) {
+	file, err := os.Open(filename)
+	if err != nil {
+		log.Printf("Erro ao abrir arquivo %s: %v", filename, err)
+		return
 	}
-}
+	defer file.Close()
 
-func (r *Report) AddEvent(event Event) {
-	r.Events = append(r.Events, event)
-}
-func (r *Report) AddEventSafe(event Event) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.Events = append(r.Events, event)
-}
-func (r *Report) AddError() {
-	r.Errors++
-}
-func (r *Report) AddErrorSafe() {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.Errors++
-}
-func ProcessSequential(files []string) *Report {
-
-	report := NewReport()
-
-	for _, file := range files {
-		fileHandle, err := os.Open(file)
-
-		if err != nil {
-			println("Erro de Arquivo : ", file)
-			report.AddError()
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		var event Event
+		line := scanner.Bytes()
+		// Ignora linhas vazias
+		if len(line) == 0 {
 			continue
 		}
 
-		scanner := bufio.NewScanner(fileHandle)
-
-		for scanner.Scan() {
-			line := scanner.Text()
-
-			var event Event
-
-			err := json.Unmarshal([]byte(line), &event)
-
-			if err != nil {
-				report.AddError()
-				continue
-			}
-
-			report.AddEvent(event)
+		if err := json.Unmarshal(line, &event); err != nil {
+			addErrorFunc(err) // Chama a callback de erro
+			continue
 		}
+		addEventFunc(event) // Chama a callback de sucesso
+	}
+}
 
-		fileHandle.Close()
+// --- Fim da Parte 0 ---
+
+// Parte 1: Implementação Síncrona
+func ProcessSequential(files []string) *Report {
+	report := NewReport()
+
+	// Define as callbacks para a versão síncrona
+	addEvent := func(e Event) { report.AddEvent(e) }
+	addError := func(err error) { report.AddError() }
+
+	for _, file := range files {
+		processFile(file, addEvent, addError)
 	}
 
 	return report
 }
+
+// Parte 2: Concorrência Ingênua
 func ProcessConcurrentNaive(files []string) *Report {
 	report := NewReport()
 	var wg sync.WaitGroup
 
+	// Define as callbacks (não-seguras)
+	addEvent := func(e Event) { report.AddEvent(e) }
+	addError := func(err error) { report.AddError() }
+
 	for _, file := range files {
 		wg.Add(1)
-
 		go func(filename string) {
 			defer wg.Done()
-			fileHandle, err := os.Open(file)
-
-			if err != nil {
-				println("Erro de Arquivo : ", file)
-				report.AddError()
-				return
-			}
-
-			scanner := bufio.NewScanner(fileHandle)
-
-			for scanner.Scan() {
-				line := scanner.Text()
-
-				var event Event
-
-				err := json.Unmarshal([]byte(line), &event)
-
-				if err != nil {
-					report.AddError()
-					continue
-				}
-
-				report.AddEvent(event)
-			}
-
-			defer fileHandle.Close()
+			processFile(filename, addEvent, addError)
 		}(file)
-
 	}
+
 	wg.Wait()
 	return report
 }
 
+// Parte 3: Correção com sync.Mutex
 func ProcessConcurrentMutex(files []string) *Report {
 	report := NewReport()
 	var wg sync.WaitGroup
 
+	// Define as callbacks (seguras)
+	addEventSafe := func(e Event) { report.AddEventSafe(e) }
+	addErrorSafe := func(err error) { report.AddErrorSafe() }
+
 	for _, file := range files {
 		wg.Add(1)
-
 		go func(filename string) {
 			defer wg.Done()
-			fileHandle, err := os.Open(file)
-
-			if err != nil {
-				println("Erro de Arquivo : ", file)
-				report.AddErrorSafe()
-				return
-			}
-			defer fileHandle.Close()
-
-			scanner := bufio.NewScanner(fileHandle)
-
-			for scanner.Scan() {
-				line := scanner.Text()
-
-				var event Event
-
-				err := json.Unmarshal([]byte(line), &event)
-
-				if err != nil {
-					report.AddErrorSafe()
-					continue
-				}
-
-				report.AddEventSafe(event)
-			}
-
+			processFile(filename, addEventSafe, addErrorSafe)
 		}(file)
-
 	}
+
 	wg.Wait()
 	return report
 }
 
+// Estrutura para encapsular o resultado do processamento de uma linha
 type ProcessResult struct {
 	Event Event
-	Error string
+	Err   error
 }
 
+// Parte 4: Padrão Pipeline
 func ProcessPipeline(files []string, numWorkers int) *Report {
 	jobs := make(chan string, len(files))
+	// O canal de resultados agora carrega a struct ProcessResult
 	results := make(chan ProcessResult, 1000)
+	var wgWorkers sync.WaitGroup
 
-	report := NewReport()
-
-	// =========================================
-	// WORKERS
-	// =========================================
-
-	var wg sync.WaitGroup
-
-	for i := 0; i < numWorkers; i++ {
-		wg.Add(1)
-
+	// 1. Inicia os workers
+	for w := 0; w < numWorkers; w++ {
+		wgWorkers.Add(1)
 		go func() {
-			defer wg.Done()
-
+			defer wgWorkers.Done()
 			for filename := range jobs {
-
-				fileHandle, err := os.Open(filename)
-
+				file, err := os.Open(filename)
 				if err != nil {
-					results <- ProcessResult{
-						Error: err.Error(),
-					}
+					// Não podemos enviar o erro do Open() para o results
+					// pois o agregador não saberá quando parar.
+					// Em um sistema real, isso iria para um log.
+					log.Printf("Erro fatal ao abrir %s: %v", filename, err)
 					continue
 				}
 
-				scanner := bufio.NewScanner(fileHandle)
-
+				scanner := bufio.NewScanner(file)
 				for scanner.Scan() {
-					line := scanner.Text()
-
-					var event Event
-
-					err := json.Unmarshal([]byte(line), &event)
-
-					if err != nil {
-						results <- ProcessResult{
-							Error: err.Error(),
-						}
+					line := scanner.Bytes()
+					if len(line) == 0 {
 						continue
 					}
 
-					results <- ProcessResult{
-						Event: event,
+					var event Event
+					if err := json.Unmarshal(line, &event); err != nil {
+						// CORREÇÃO: Envia o erro pelo canal
+						results <- ProcessResult{Err: err}
+					} else {
+						// Envia o evento válido pelo canal
+						results <- ProcessResult{Event: event, Err: nil}
 					}
 				}
-
-				if err := scanner.Err(); err != nil {
-					results <- ProcessResult{
-						Error: err.Error(),
-					}
-				}
-
-				fileHandle.Close()
+				file.Close()
 			}
 		}()
 	}
 
-	// =========================================
-	// AGGREGATOR
-	// =========================================
-
-	done := make(chan struct{})
-
-	go func() {
-		for res := range results {
-
-			if res.Error != "" {
-				report.AddError()
-				continue
-			}
-
-			report.AddEvent(res.Event)
-		}
-
-		close(done)
-	}()
-
-	// =========================================
-	// ENVIA OS JOBS
-	// =========================================
-
+	// 2. Envia os trabalhos para o canal de jobs
 	for _, file := range files {
 		jobs <- file
 	}
+	close(jobs) // Fecha o canal de jobs
 
-	close(jobs)
+	// 3. Goroutine de coordenação para fechar o canal 'results'
+	// SÓ APÓS todos os workers terminarem.
+	go func() {
+		wgWorkers.Wait()
+		close(results)
+	}()
 
-	// =========================================
-	// ESPERA OS WORKERS
-	// =========================================
-
-	wg.Wait()
-
-	// =========================================
-	// FECHA RESULTS
-	// =========================================
-
-	close(results)
-
-	// =========================================
-	// ESPERA AGGREGATOR
-	// =========================================
-
-	<-done
+	// 4. Agrega os resultados (Fan-In)
+	report := NewReport()
+	for res := range results {
+		if res.Err != nil {
+			// CORREÇÃO: Conta o erro
+			report.AddError()
+		} else {
+			// Conta o evento (usa AddEvent, sem mutex, pois é single-threaded)
+			report.AddEvent(res.Event)
+		}
+	}
 
 	return report
+}
+
+// Parte 5: Função main (Execução e Benchmark)
+func main() {
+	const (
+		LogDir        = "./logs"
+		NumFiles      = 100 // Aumentado para ver melhor a diferença
+		EventsPerFile = 1000
+		NumWorkers    = 8 // Número de workers para o pool
+	)
+
+	// Setup: Gera novos arquivos de log
+	fmt.Println("Gerando arquivos de log de exemplo...")
+	if err := os.RemoveAll(LogDir); err != nil {
+		log.Fatalf("Falha ao limpar diretório de logs: %v", err)
+	}
+	if err := GenerateMockFiles(LogDir, NumFiles, EventsPerFile); err != nil {
+		log.Fatalf("Falha ao gerar arquivos de mock: %v", err)
+	}
+	fmt.Printf("%d arquivos gerados com %d eventos cada.\n\n", NumFiles, EventsPerFile)
+
+	files, err := filepath.Glob(filepath.Join(LogDir, "*.json"))
+	if err != nil {
+		log.Fatalf("Falha ao listar arquivos de log: %v", err)
+	}
+
+	// --- Benchmarking ---
+
+	// 1. Sequencial
+	fmt.Print("[Sequential] \t\t")
+	start := time.Now()
+	reportSeq := ProcessSequential(files)
+	duration := time.Since(start)
+	fmt.Printf("Tempo: %v \tEventos: %d \tErros: %d\n", duration, reportSeq.TotalEvents, reportSeq.TotalErrors)
+
+	// 2. Concorrente Ingênua
+	//fmt.Print("[Concurrent Naive]\t")
+	//start = time.Now()
+	//reportNaive := ProcessConcurrentNaive(files)
+	//duration = time.Since(start)
+	//fmt.Printf("Tempo: %v \tEventos: %d (Incorreto!) \tErros: %d (Incorreto!)\n", duration, reportNaive.TotalEvents, reportNaive.TotalErrors)
+
+	// 3. Concorrente com Mutex
+	fmt.Print("[Concurrent Mutex]\t")
+	start = time.Now()
+	reportMutex := ProcessConcurrentMutex(files)
+	duration = time.Since(start)
+	fmt.Printf("Tempo: %v \tEventos: %d \tErros: %d\n", duration, reportMutex.TotalEvents, reportMutex.TotalErrors)
+
+	// 4. Pipeline com Worker Pool
+	fmt.Print("[Pipeline] \t\t")
+	start = time.Now()
+	reportPipeline := ProcessPipeline(files, NumWorkers)
+	duration = time.Since(start)
+	fmt.Printf("Tempo: %v \tEventos: %d \tErros: %d\n", duration, reportPipeline.TotalEvents, reportPipeline.TotalErrors)
+
+	fmt.Println("\n--- Verificação de Corretude ---")
+	if reportSeq.TotalEvents == reportMutex.TotalEvents &&
+		reportSeq.TotalErrors == reportMutex.TotalErrors &&
+		reportSeq.TotalEvents == reportPipeline.TotalEvents &&
+		reportSeq.TotalErrors == reportPipeline.TotalErrors {
+		fmt.Println("✅ SUCESSO: Partes 1, 3, e 4 produziram resultados idênticos.")
+	} else {
+		fmt.Println("❌ FALHA: Os resultados não são idênticos.")
+		fmt.Printf("  Seq:     Eventos=%d, Erros=%d\n", reportSeq.TotalEvents, reportSeq.TotalErrors)
+		fmt.Printf("  Mutex:   Eventos=%d, Erros=%d\n", reportMutex.TotalEvents, reportMutex.TotalErrors)
+		fmt.Printf("  Pipeline: Eventos=%d, Erros=%d\n", reportPipeline.TotalEvents, reportPipeline.TotalErrors)
+	}
+
+	fmt.Println("\nExecute com 'go run -race .' para ver a falha na Parte 2.")
 }
