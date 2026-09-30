@@ -42,11 +42,18 @@ func main() {
 	//fmt.Println("Fim da Leitura do Processamento Concorrente : ", elapsed)
 	//fmt.Println(report.Errors)
 
-	fmt.Println("Inicio da Leitura Concorrente com Mutex (A Solução de Memória Compartilhada): ")
+	//fmt.Println("Inicio da Leitura Concorrente com Mutex (A Solução de Memória Compartilhada): ")
+	//start := time.Now()
+	//report := ProcessConcurrentMutex(files)
+	//elapsed := time.Since(start)
+	//fmt.Println("Fim da Leitura do Processamento Concorrente  com Mutex (A Solução de Memória Compartilhada): ", elapsed)
+	//fmt.Println(report.Errors)
+
+	fmt.Println("Inicio da Leitura ProcessPipeline : O Padrão Idiomático (Worker Pool & Channels) ")
 	start := time.Now()
-	report := ProcessConcurrentMutex(files)
+	report := ProcessPipeline(files, 2)
 	elapsed := time.Since(start)
-	fmt.Println("Fim da Leitura do Processamento Concorrente  com Mutex (A Solução de Memória Compartilhada): ", elapsed)
+	fmt.Println("Fim da Leitura  ProcessPipeline : O Padrão Idiomático (Worker Pool & Channels) tempo: ", elapsed)
 	fmt.Println(report.Errors)
 
 }
@@ -238,5 +245,122 @@ func ProcessConcurrentMutex(files []string) *Report {
 
 	}
 	wg.Wait()
+	return report
+}
+
+type ProcessResult struct {
+	Event Event
+	Error string
+}
+
+func ProcessPipeline(files []string, numWorkers int) *Report {
+	jobs := make(chan string, len(files))
+	results := make(chan ProcessResult, 1000)
+
+	report := NewReport()
+
+	// =========================================
+	// WORKERS
+	// =========================================
+
+	var wg sync.WaitGroup
+
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+
+			for filename := range jobs {
+
+				fileHandle, err := os.Open(filename)
+
+				if err != nil {
+					results <- ProcessResult{
+						Error: err.Error(),
+					}
+					continue
+				}
+
+				scanner := bufio.NewScanner(fileHandle)
+
+				for scanner.Scan() {
+					line := scanner.Text()
+
+					var event Event
+
+					err := json.Unmarshal([]byte(line), &event)
+
+					if err != nil {
+						results <- ProcessResult{
+							Error: err.Error(),
+						}
+						continue
+					}
+
+					results <- ProcessResult{
+						Event: event,
+					}
+				}
+
+				if err := scanner.Err(); err != nil {
+					results <- ProcessResult{
+						Error: err.Error(),
+					}
+				}
+
+				fileHandle.Close()
+			}
+		}()
+	}
+
+	// =========================================
+	// AGGREGATOR
+	// =========================================
+
+	done := make(chan struct{})
+
+	go func() {
+		for res := range results {
+
+			if res.Error != "" {
+				report.AddError()
+				continue
+			}
+
+			report.AddEvent(res.Event)
+		}
+
+		close(done)
+	}()
+
+	// =========================================
+	// ENVIA OS JOBS
+	// =========================================
+
+	for _, file := range files {
+		jobs <- file
+	}
+
+	close(jobs)
+
+	// =========================================
+	// ESPERA OS WORKERS
+	// =========================================
+
+	wg.Wait()
+
+	// =========================================
+	// FECHA RESULTS
+	// =========================================
+
+	close(results)
+
+	// =========================================
+	// ESPERA AGGREGATOR
+	// =========================================
+
+	<-done
+
 	return report
 }
